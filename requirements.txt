@@ -1,0 +1,11 @@
+gradio>=4.44.0
+bentoml>=1.2,<2.0
+pandas>=2.0
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.4
+prefixspan>=0.5
+mlxtend>=0.23
+openai>=1.0
+pytest>=8.0
+

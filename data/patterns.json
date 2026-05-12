@@ -1,0 +1,221 @@
+[
+  {
+    "pattern": [
+      "/"
+    ],
+    "support_abs": 300,
+    "support_pct": 97.4,
+    "length": 1,
+    "pattern_str": "/"
+  },
+  {
+    "pattern": [
+      "/products/{id}"
+    ],
+    "support_abs": 228,
+    "support_pct": 74.0,
+    "length": 1,
+    "pattern_str": "/products/{id}"
+  },
+  {
+    "pattern": [
+      "/",
+      "/products/{id}"
+    ],
+    "support_abs": 220,
+    "support_pct": 71.4,
+    "length": 2,
+    "pattern_str": "/ → /products/{id}"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 187,
+    "support_pct": 60.7,
+    "length": 2,
+    "pattern_str": "/products/{id} → /cart"
+  },
+  {
+    "pattern": [
+      "/",
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 179,
+    "support_pct": 58.1,
+    "length": 3,
+    "pattern_str": "/ → /products/{id} → /cart"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/products/{id}"
+    ],
+    "support_abs": 173,
+    "support_pct": 56.2,
+    "length": 2,
+    "pattern_str": "/products/{id} → /products/{id}"
+  },
+  {
+    "pattern": [
+      "/",
+      "/products/{id}",
+      "/products/{id}"
+    ],
+    "support_abs": 165,
+    "support_pct": 53.6,
+    "length": 3,
+    "pattern_str": "/ → /products/{id} → /products/{id}"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 146,
+    "support_pct": 47.4,
+    "length": 3,
+    "pattern_str": "/products/{id} → /products/{id} → /cart"
+  },
+  {
+    "pattern": [
+      "/",
+      "/products/{id}",
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 138,
+    "support_pct": 44.8,
+    "length": 4,
+    "pattern_str": "/ → /products/{id} → /products/{id} → /cart"
+  },
+  {
+    "pattern": [
+      "/",
+      "/catalog/men"
+    ],
+    "support_abs": 130,
+    "support_pct": 42.2,
+    "length": 2,
+    "pattern_str": "/ → /catalog/men"
+  },
+  {
+    "pattern": [
+      "/",
+      "/catalog/women"
+    ],
+    "support_abs": 130,
+    "support_pct": 42.2,
+    "length": 2,
+    "pattern_str": "/ → /catalog/women"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/cart",
+      "/checkout"
+    ],
+    "support_abs": 120,
+    "support_pct": 39.0,
+    "length": 3,
+    "pattern_str": "/products/{id} → /cart → /checkout"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/checkout"
+    ],
+    "support_abs": 120,
+    "support_pct": 39.0,
+    "length": 2,
+    "pattern_str": "/products/{id} → /checkout"
+  },
+  {
+    "pattern": [
+      "/",
+      "/products/{id}",
+      "/cart",
+      "/checkout",
+      "/order/confirm"
+    ],
+    "support_abs": 112,
+    "support_pct": 36.4,
+    "length": 5,
+    "pattern_str": "/ → /products/{id} → /cart → /checkout → /order/confirm"
+  },
+  {
+    "pattern": [
+      "/",
+      "/catalog/women",
+      "/products/{id}",
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 103,
+    "support_pct": 33.4,
+    "length": 5,
+    "pattern_str": "/ → /catalog/women → /products/{id} → /products/{id} → /cart"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/products/{id}",
+      "/products/{id}"
+    ],
+    "support_abs": 97,
+    "support_pct": 31.5,
+    "length": 3,
+    "pattern_str": "/products/{id} → /products/{id} → /products/{id}"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/products/{id}",
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 97,
+    "support_pct": 31.5,
+    "length": 4,
+    "pattern_str": "/products/{id} → /products/{id} → /products/{id} → /cart"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/products/{id}",
+      "/cart",
+      "/checkout"
+    ],
+    "support_abs": 93,
+    "support_pct": 30.2,
+    "length": 4,
+    "pattern_str": "/products/{id} → /products/{id} → /cart → /checkout"
+  },
+  {
+    "pattern": [
+      "/products/{id}",
+      "/products/{id}",
+      "/checkout"
+    ],
+    "support_abs": 93,
+    "support_pct": 30.2,
+    "length": 3,
+    "pattern_str": "/products/{id} → /products/{id} → /checkout"
+  },
+  {
+    "pattern": [
+      "/",
+      "/products/{id}",
+      "/products/{id}",
+      "/products/{id}",
+      "/cart"
+    ],
+    "support_abs": 89,
+    "support_pct": 28.9,
+    "length": 5,
+    "pattern_str": "/ → /products/{id} → /products/{id} → /products/{id} → /cart"
+  }
+]
