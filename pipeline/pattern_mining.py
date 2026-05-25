@@ -35,10 +35,8 @@ def mine_patterns(
                 seq = _gap_filter(seq, tss, max_gap_sec)
         if len(seq) >= 2:
             db.append(seq)
-
     if len(db) < 2:
         return []
-
     min_sup = max(2, int(len(db) * min_support_pct))
     raw = PrefixSpan(db).topk(top_k, closed=True)
 

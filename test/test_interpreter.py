@@ -1,32 +1,28 @@
 """
 tests/test_interpreter.py
-Тесты модуля interpreter.py — без реальных вызовов API (используются моки).
-
-Запуск:
-    cd web_log_analyzer
-    python -m pytest tests/test_interpreter.py -v
+Тесты interpreter.py — без реальных вызовов API (моки).
 """
 
 import json
 import os
 import sys
-from typing import Dict, List
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pandas as pd
+import numpy as np
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.interpreter import (
-    RESPONSE_SCHEMA,
+    SCHEMA,
     SYSTEM_PROMPT,
-    _anonymize_sessions,
-    _pick_representative_sessions,
-    build_prompt,
-    format_interpretations_text,
-    interpret_all_patterns,
-    interpret_pattern,
+    _build_prompt,
+    _build_pattern_prompt,
+    _call,
+    _clusters_for_pattern,
+    format_results,
+    interpret_all,
 )
 
 
@@ -43,328 +39,324 @@ MOCK_RESPONSE = {
 }
 
 
-def _make_df(n: int = 20) -> pd.DataFrame:
-    import numpy as np
+def _make_df(n: int = 30) -> pd.DataFrame:
     rng = np.random.default_rng(0)
     rows = []
+    seqs = [
+        ["/", "/catalog", "/products/{id}", "/cart", "/checkout"],
+        ["/", "/catalog", "/products/{id}"],
+        ["/", "/search", "/products/{id}", "/cart"],
+    ]
     for i in range(n):
-        seq = ["/", "/catalog", "/products/{id}"]
+        seq = seqs[i % len(seqs)]
         rows.append({
-            "session_id":    f"s_{i}",
-            "ip_hash":       f"ip_{i % 5}",
-            "request_count": float(rng.integers(2, 10)),
-            "duration_sec":  float(rng.integers(30, 300)),
-            "unique_pages":  3.0,
-            "error_rate":    0.0,
-            "avg_bytes":     2000.0,
-            "page_sequence": seq,
-            "page_set":      list(set(seq)),
-            "cluster_id":    i % 3,
-            "anomaly_flag":  i >= n - 3,
+            "session_id":       f"s_{i}",
+            "ip_hash":          f"ip_{i % 5}",
+            "request_count":    float(rng.integers(2, 10)),
+            "duration_sec":     float(rng.integers(30, 300)),
+            "unique_pages":     float(len(set(seq))),
+            "error_rate":       float(rng.uniform(0, 0.1)),
+            "avg_bytes":        2000.0,
+            "page_sequence":    seq,
+            "page_set":         list(set(seq)),
+            "cluster_id":       i % 3,
+            "anomaly_flag":     i >= n - 3,
             "anomaly_priority": i >= n - 2,
-            "if_score":      float(i) / n,
-            "methods_triggered": 2 if i >= n - 2 else 0,
         })
     return pd.DataFrame(rows)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# _anonymize_sessions
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestAnonymizeSessions:
-
-    def test_ip_replaced(self):
-        sessions = [
-            {"ip_hash": "abc123", "request_count": 5},
-            {"ip_hash": "def456", "request_count": 3},
-        ]
-        result = _anonymize_sessions(sessions)
-        for r in result:
-            assert "ip_hash" not in r
-            assert r["user_id"].startswith("user_")
-
-    def test_same_ip_same_alias(self):
-        sessions = [
-            {"ip_hash": "abc", "request_count": 1},
-            {"ip_hash": "abc", "request_count": 2},
-        ]
-        result = _anonymize_sessions(sessions)
-        assert result[0]["user_id"] == result[1]["user_id"]
-
-    def test_different_ips_different_alias(self):
-        sessions = [
-            {"ip_hash": "aaa", "request_count": 1},
-            {"ip_hash": "bbb", "request_count": 2},
-        ]
-        result = _anonymize_sessions(sessions)
-        assert result[0]["user_id"] != result[1]["user_id"]
-
-    def test_safe_keys_preserved(self):
-        sessions = [{
-            "ip_hash": "x",
-            "request_count": 5,
-            "duration_sec": 120.0,
-            "page_sequence": ["/", "/catalog"],
-            "secret_field": "should_be_removed",
-        }]
-        result = _anonymize_sessions(sessions)
-        assert "request_count" in result[0]
-        assert "duration_sec" in result[0]
-        assert "page_sequence" in result[0]
-        assert "secret_field" not in result[0]
-
-    def test_empty_list(self):
-        assert _anonymize_sessions([]) == []
+def _make_patterns() -> list:
+    return [
+        {
+            "pattern":     ["/", "/catalog", "/products/{id}"],
+            "pattern_str": "/ → /catalog → /products/{id}",
+            "support_abs": 20,
+            "support_pct": 66.7,
+            "length":      3,
+        },
+        {
+            "pattern":     ["/", "/search", "/products/{id}"],
+            "pattern_str": "/ → /search → /products/{id}",
+            "support_abs": 10,
+            "support_pct": 33.3,
+            "length":      3,
+        },
+    ]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# _pick_representative_sessions
-# ═══════════════════════════════════════════════════════════════════════════
-
-class TestPickRepresentativeSessions:
-
-    def test_respects_n_limit(self):
-        df = _make_df(30)
-        result = _pick_representative_sessions(df, n=5)
-        assert len(result) <= 5
-
-    def test_returns_list_of_dicts(self):
-        df = _make_df(10)
-        result = _pick_representative_sessions(df, n=5)
-        assert isinstance(result, list)
-        assert all(isinstance(r, dict) for r in result)
-
-    def test_page_sequence_truncated(self):
-        import pandas as pd
-        df = pd.DataFrame([{
-            "session_id": "s0",
-            "ip_hash": "x",
-            "page_sequence": [f"/page/{i}" for i in range(20)],
-        }])
-        result = _pick_representative_sessions(df, n=5)
-        assert len(result[0]["page_sequence"]) <= 10
-
-    def test_prefer_high_score(self):
-        df = _make_df(20)
-        result_high = _pick_representative_sessions(df, n=5, prefer_high_score=True)
-        result_normal = _pick_representative_sessions(df, n=5, prefer_high_score=False)
-        # Они могут отличаться — просто проверяем, что оба возвращают данные
-        assert len(result_high) > 0
-        assert len(result_normal) > 0
-
-    def test_empty_df(self):
-        result = _pick_representative_sessions(pd.DataFrame(), n=5)
-        assert result == []
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# build_prompt
+# _build_prompt  (кластерный промпт — без изменений)
 # ═══════════════════════════════════════════════════════════════════════════
 
 class TestBuildPrompt:
 
-    def _make_sessions(self):
-        return [{"ip_hash": "aaa", "request_count": 5, "page_sequence": ["/", "/catalog"]}]
-
-    def test_contains_pattern_type(self):
-        prompt = build_prompt("Кластер 0", {}, self._make_sessions())
-        assert "Кластер 0" in prompt
+    def test_contains_cluster_id(self):
+        prompt = _build_prompt(0, {"size": 10}, [], {})
+        assert "0" in prompt
 
     def test_contains_stats(self):
-        stats = {"size": 42, "median_requests": 5.0}
-        prompt = build_prompt("test", stats, self._make_sessions())
+        prompt = _build_prompt(1, {"size": 42, "pct": 30.0}, [], {})
         assert "42" in prompt
-        assert "median_requests" in prompt
 
-    def test_anomaly_flag_noted(self):
-        prompt = build_prompt("test", {}, self._make_sessions(), anomaly_flag=True)
-        assert "НЕТИПИЧНЫЙ" in prompt.upper() or "АНОМАЛ" in prompt.upper()
+    def test_anomaly_flag_high(self):
+        prompt = _build_prompt(0, {}, [], {"priority_pct": 25.0})
+        assert "АНОМАЛЬНЫХ" in prompt.upper()
 
-    def test_no_anomaly_flag_when_false(self):
-        prompt = build_prompt("test", {}, self._make_sessions(), anomaly_flag=False)
-        assert "⚠️" not in prompt
+    def test_no_anomaly_flag_when_low(self):
+        prompt = _build_prompt(0, {}, [], {"priority_pct": 5.0})
+        assert "ВЫСОКАЯ ДОЛЯ" not in prompt
 
-    def test_extra_context_included(self):
-        prompt = build_prompt("test", {}, self._make_sessions(),
-                              extra_context="/ → /catalog → /checkout")
-        assert "/checkout" in prompt
+    def test_pattern_included(self):
+        prompt = _build_prompt(0, {}, _make_patterns(), {})
+        assert "/catalog" in prompt
 
-    def test_ip_not_in_prompt(self):
-        sessions = [{"ip_hash": "192.168.1.100", "request_count": 3}]
-        prompt = build_prompt("test", {}, sessions)
-        assert "192.168.1.100" not in prompt
+    def test_no_patterns_fallback(self):
+        prompt = _build_prompt(0, {}, [], {})
+        assert "не обнаружено" in prompt.lower()
 
     def test_returns_string(self):
-        prompt = build_prompt("test", {}, self._make_sessions())
-        assert isinstance(prompt, str)
-        assert len(prompt) > 50
+        assert isinstance(_build_prompt(0, {}, [], {}), str)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# interpret_pattern (с моком API)
+# _build_pattern_prompt  (новый промпт для анализа паттерна)
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestInterpretPattern:
+class TestBuildPatternPrompt:
 
-    def _mock_response(self, data: dict = None):
-        """Создаёт мок объекта ответа OpenAI."""
-        resp_data = data or MOCK_RESPONSE
-        msg = MagicMock()
-        msg.content = json.dumps(resp_data, ensure_ascii=False)
-        choice = MagicMock()
-        choice.message = msg
-        response = MagicMock()
-        response.choices = [choice]
-        return response
+    @pytest.fixture
+    def pattern(self):
+        return _make_patterns()[0]
 
-    @patch("pipeline.interpreter._call_api")
-    def test_returns_dict(self, mock_call):
-        mock_call.return_value = MOCK_RESPONSE
-        result = interpret_pattern(
-            pattern_type="Кластер 0",
-            stats={"size": 10},
-            sessions=[{"ip_hash": "x", "request_count": 3}],
-            api_key="sk-test",
-        )
-        assert isinstance(result, dict)
+    def test_returns_string(self, pattern):
+        assert isinstance(_build_pattern_prompt(pattern, []), str)
 
-    @patch("pipeline.interpreter._call_api")
-    def test_result_has_required_fields(self, mock_call):
-        mock_call.return_value = MOCK_RESPONSE
-        result = interpret_pattern(
-            pattern_type="Кластер 0",
-            stats={},
-            sessions=[],
-            api_key="sk-test",
-        )
-        for field in ("classification", "confidence", "description",
-                      "problems", "recommendations"):
-            assert field in result
+    def test_contains_each_step(self, pattern):
+        prompt = _build_pattern_prompt(pattern, [])
+        for step in pattern["pattern"]:
+            assert step in prompt
 
-    @patch("pipeline.interpreter._call_api")
-    def test_classification_valid(self, mock_call):
-        mock_call.return_value = MOCK_RESPONSE
-        result = interpret_pattern("test", {}, [], api_key="sk-test")
-        assert result["classification"] in ("типичный", "нетипичный")
+    def test_contains_support_metrics(self, pattern):
+        prompt = _build_pattern_prompt(pattern, [])
+        assert "20" in prompt       # support_abs
+        assert "66.7" in prompt     # support_pct
 
-    @patch("pipeline.interpreter._call_api")
-    def test_api_called_once(self, mock_call):
-        mock_call.return_value = MOCK_RESPONSE
-        interpret_pattern("test", {}, [], api_key="sk-test")
-        assert mock_call.call_count == 1
+    def test_contains_length(self, pattern):
+        prompt = _build_pattern_prompt(pattern, [])
+        assert "3" in prompt
 
-    @patch("pipeline.interpreter._call_api")
-    def test_api_key_passed(self, mock_call):
-        mock_call.return_value = MOCK_RESPONSE
-        interpret_pattern("test", {}, [], api_key="sk-mykey-123")
-        _, kwargs = mock_call.call_args
-        assert kwargs.get("api_key") == "sk-mykey-123"
+    def test_step_numbering(self, pattern):
+        prompt = _build_pattern_prompt(pattern, [])
+        assert "Шаг 1" in prompt
+        assert "Шаг 3" in prompt
+
+    def test_cluster_stats_included(self, pattern):
+        stats = [{"cluster_id": 0, "size": 10, "med_requests": 5.0, "med_errors": 0.02}]
+        prompt = _build_pattern_prompt(pattern, stats)
+        assert "Кластер 0" in prompt
+        assert "10" in prompt
+
+    def test_no_cluster_stats(self, pattern):
+        prompt = _build_pattern_prompt(pattern, [])
+        assert "Кластер" not in prompt
+
+    def test_contains_task_instructions(self, pattern):
+        prompt = _build_pattern_prompt(pattern, [])
+        # Промпт должен явно просить тест-кейсы / UX-анализ
+        assert any(kw in prompt for kw in ("тест", "проверить", "шаг", "Задача"))
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# interpret_all_patterns (с моком API)
+# _clusters_for_pattern
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestInterpretAllPatterns:
+class TestClustersForPattern:
+
+    @pytest.fixture
+    def df(self):
+        return _make_df(30)
+
+    def test_returns_only_matching_clusters(self, df):
+        pattern = _make_patterns()[0]   # / → /catalog → /products/{id}
+        stats = [
+            {"cluster_id": 0, "size": 10, "med_requests": 4.0, "med_errors": 0.0},
+            {"cluster_id": 1, "size": 10, "med_requests": 4.0, "med_errors": 0.0},
+            {"cluster_id": 2, "size": 10, "med_requests": 4.0, "med_errors": 0.0},
+        ]
+        result = _clusters_for_pattern(df, pattern, stats)
+        ids = {c["cluster_id"] for c in result}
+        # кластер 0 содержит seqs[0] и seqs[1], которые включают паттерн
+        assert 0 in ids
+
+    def test_empty_when_no_match(self, df):
+        pattern = {
+            "pattern": ["/nonexistent", "/also-nonexistent"],
+            "pattern_str": "/nonexistent → /also-nonexistent",
+        }
+        result = _clusters_for_pattern(df, pattern, [{"cluster_id": 0, "size": 5,
+                                                       "med_requests": 2.0, "med_errors": 0.0}])
+        assert result == []
+
+    def test_returns_list_of_dicts(self, df):
+        result = _clusters_for_pattern(df, _make_patterns()[0],
+                                       [{"cluster_id": 0, "size": 5,
+                                         "med_requests": 2.0, "med_errors": 0.0}])
+        assert isinstance(result, list)
+        for item in result:
+            assert isinstance(item, dict)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# interpret_all
+# ═══════════════════════════════════════════════════════════════════════════
+
+class TestInterpretAll:
 
     @pytest.fixture
     def df(self):
         return _make_df(30)
 
     @pytest.fixture
-    def seq_patterns(self):
-        return [
-            {
-                "pattern":     ["/", "/catalog", "/products/{id}"],
-                "support_abs": 15,
-                "support_pct": 75.0,
-                "length":      3,
-                "pattern_str": "/ → /catalog → /products/{id}",
-            }
-        ]
+    def patterns(self):
+        return _make_patterns()
 
-    @patch("pipeline.interpreter._call_api")
-    def test_returns_dict_with_keys(self, mock_call, df, seq_patterns):
+    # ── структура возвращаемого словаря ───────────────────────────────────
+
+    @patch("pipeline.interpreter._call")
+    def test_returns_dict_with_clusters_and_patterns(self, mock_call, df, patterns):
         mock_call.return_value = MOCK_RESPONSE
-        result = interpret_all_patterns(
-            df=df,
-            seq_patterns=seq_patterns,
-            rules_df=pd.DataFrame(),
-            api_key="sk-test",
-            max_clusters=2,
-            max_patterns=1,
-            max_anomaly_groups=1,
-        )
-        assert "clusters" in result
-        assert "patterns" in result
-        assert "anomalies" in result
-
-    @patch("pipeline.interpreter._call_api")
-    def test_clusters_interpreted(self, mock_call, df, seq_patterns):
-        mock_call.return_value = MOCK_RESPONSE
-        result = interpret_all_patterns(
-            df=df, seq_patterns=[], rules_df=pd.DataFrame(),
-            api_key="sk-test", max_clusters=3, max_patterns=0,
-            max_anomaly_groups=0,
-        )
-        assert len(result["clusters"]) <= 3
-
-    @patch("pipeline.interpreter._call_api")
-    def test_patterns_interpreted(self, mock_call, df, seq_patterns):
-        mock_call.return_value = MOCK_RESPONSE
-        result = interpret_all_patterns(
-            df=df, seq_patterns=seq_patterns, rules_df=pd.DataFrame(),
-            api_key="sk-test", max_clusters=0, max_patterns=1,
-            max_anomaly_groups=0,
-        )
-        assert len(result["patterns"]) <= 1
-
-    @patch("pipeline.interpreter._call_api")
-    def test_api_error_handled_gracefully(self, mock_call, df, seq_patterns):
-        """Ошибка API не роняет весь конвейер."""
-        mock_call.side_effect = RuntimeError("API недоступен")
-        result = interpret_all_patterns(
-            df=df, seq_patterns=seq_patterns, rules_df=pd.DataFrame(),
-            api_key="sk-test", max_clusters=1, max_patterns=1,
-            max_anomaly_groups=0,
-        )
-        # Результаты содержат поле error, но структура сохранена
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test")
         assert "clusters" in result
         assert "patterns" in result
 
-    @patch("pipeline.interpreter._call_api")
-    def test_progress_callback_called(self, mock_call, df, seq_patterns):
+    @patch("pipeline.interpreter._call")
+    def test_cluster_keys_are_ints(self, mock_call, df, patterns):
         mock_call.return_value = MOCK_RESPONSE
-        calls = []
-        def _cb(cur, total, label):
-            calls.append((cur, total, label))
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test", max_clusters=3)
+        for k in result["clusters"]:
+            assert isinstance(k, int)
 
-        interpret_all_patterns(
-            df=df, seq_patterns=seq_patterns, rules_df=pd.DataFrame(),
-            api_key="sk-test", max_clusters=2, max_patterns=1,
-            max_anomaly_groups=0, progress_callback=_cb,
-        )
-        assert len(calls) > 0
-
-    @patch("pipeline.interpreter._call_api")
-    def test_empty_df(self, mock_call):
+    @patch("pipeline.interpreter._call")
+    def test_patterns_list_length(self, mock_call, df, patterns):
         mock_call.return_value = MOCK_RESPONSE
-        result = interpret_all_patterns(
-            df=pd.DataFrame(), seq_patterns=[], rules_df=pd.DataFrame(),
-            api_key="sk-test",
-        )
-        assert result["clusters"] == {}
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                               max_patterns=1)
+        assert len(result["patterns"]) == 1
+
+    @patch("pipeline.interpreter._call")
+    def test_max_patterns_zero(self, mock_call, df, patterns):
+        mock_call.return_value = MOCK_RESPONSE
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                               max_patterns=0)
         assert result["patterns"] == []
 
+    # ── содержимое кластерной интерпретации ───────────────────────────────
+
+    @patch("pipeline.interpreter._call")
+    def test_cluster_result_has_required_fields(self, mock_call, df, patterns):
+        mock_call.return_value = MOCK_RESPONSE
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test", max_clusters=1)
+        cid = next(iter(result["clusters"]))
+        for field in ("classification", "confidence", "description",
+                      "problems", "recommendations"):
+            assert field in result["clusters"][cid]
+
+    # ── содержимое паттерновой интерпретации ──────────────────────────────
+
+    @patch("pipeline.interpreter._call")
+    def test_pattern_entry_has_required_fields(self, mock_call, df, patterns):
+        mock_call.return_value = MOCK_RESPONSE
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                               max_clusters=1, max_patterns=2)
+        for entry in result["patterns"]:
+            for field in ("pattern", "pattern_str", "support_abs",
+                          "support_pct", "length", "interpretation"):
+                assert field in entry
+
+    @patch("pipeline.interpreter._call")
+    def test_pattern_interpretation_has_schema_fields(self, mock_call, df, patterns):
+        mock_call.return_value = MOCK_RESPONSE
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                               max_clusters=1, max_patterns=2)
+        for entry in result["patterns"]:
+            interp = entry["interpretation"]
+            if "error" not in interp:
+                for field in ("classification", "confidence", "description",
+                              "problems", "recommendations"):
+                    assert field in interp
+
+    # ── вызов API ─────────────────────────────────────────────────────────
+
+    @patch("pipeline.interpreter._call")
+    def test_call_count_clusters_plus_patterns(self, mock_call, df, patterns):
+        mock_call.return_value = MOCK_RESPONSE
+        n_clusters, n_patterns = 2, 2
+        interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                      max_clusters=n_clusters, max_patterns=n_patterns)
+        # один вызов на кластер + один на паттерн
+        assert mock_call.call_count == n_clusters + n_patterns
+
+    @patch("pipeline.interpreter._call")
+    def test_pattern_prompt_differs_from_cluster_prompt(self, mock_call, df, patterns):
+        """Промпт для паттерна должен содержать шаги, а не «Кластер N»."""
+        captured = []
+        def _capture(*args, **kw):
+            # _call(prompt, api_key, retries=3)
+            captured.append(args[0] if args else kw.get("prompt", ""))
+            return MOCK_RESPONSE
+        mock_call.side_effect = _capture
+        interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                      max_clusters=1, max_patterns=1)
+        cluster_prompt = captured[0]
+        pattern_prompt = captured[1]
+        assert "Кластер" in cluster_prompt
+        assert "Шаг 1" in pattern_prompt
+
+    # ── обработка ошибок ──────────────────────────────────────────────────
+
+    @patch("pipeline.interpreter._call")
+    def test_api_error_in_cluster_handled(self, mock_call, df):
+        mock_call.side_effect = RuntimeError("timeout")
+        result = interpret_all(df=df, patterns=[], api_key="sk-test", max_clusters=1)
+        cid = next(iter(result["clusters"]))
+        assert "error" in result["clusters"][cid]
+
+    @patch("pipeline.interpreter._call")
+    def test_api_error_in_pattern_handled(self, mock_call, df, patterns):
+        mock_call.side_effect = RuntimeError("timeout")
+        result = interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                               max_clusters=0, max_patterns=1)
+        assert "error" in result["patterns"][0]["interpretation"]
+
+    @patch("pipeline.interpreter._call")
+    def test_no_cluster_id_returns_empty(self, mock_call):
+        mock_call.return_value = MOCK_RESPONSE
+        df = _make_df(10).drop(columns=["cluster_id"])
+        result = interpret_all(df=df, patterns=[], api_key="sk-test")
+        assert result == {"clusters": {}, "patterns": []}
+
+    # ── progress callback ─────────────────────────────────────────────────
+
+    @patch("pipeline.interpreter._call")
+    def test_progress_callback_called_for_clusters_and_patterns(self, mock_call, df, patterns):
+        mock_call.return_value = MOCK_RESPONSE
+        calls = []
+        interpret_all(df=df, patterns=patterns, api_key="sk-test",
+                      max_clusters=2, max_patterns=2,
+                      progress_cb=lambda cur, total, label: calls.append(label))
+        labels = calls
+        assert any("Кластер" in l for l in labels)
+        assert any("Паттерн" in l or "→" in l for l in labels)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
-# format_interpretations_text
+# format_results
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestFormatInterpretationsText:
+class TestFormatResults:
 
-    def _make_results(self):
+    def _full_results(self):
         return {
             "clusters": {
                 0: MOCK_RESPONSE,
@@ -372,100 +364,106 @@ class TestFormatInterpretationsText:
             },
             "patterns": [
                 {
+                    "pattern":     ["/", "/catalog"],
                     "pattern_str": "/ → /catalog",
-                    "support_abs": 10,
+                    "support_abs": 15,
                     "support_pct": 50.0,
+                    "length":      2,
                     "interpretation": MOCK_RESPONSE,
                 },
-            ],
-            "anomalies": [
                 {
-                    "group": "высокоприоритетные аномалии",
-                    "size": 5,
-                    "interpretation": {
-                        **MOCK_RESPONSE,
-                        "classification": "нетипичный",
-                    },
-                }
+                    "pattern":     ["/login", "/dashboard"],
+                    "pattern_str": "/login → /dashboard",
+                    "support_abs": 8,
+                    "support_pct": 26.7,
+                    "length":      2,
+                    "interpretation": {"error": "API timeout"},
+                },
             ],
         }
 
     def test_returns_string(self):
-        text = format_interpretations_text(self._make_results())
-        assert isinstance(text, str)
+        assert isinstance(format_results(self._full_results()), str)
 
-    def test_contains_cluster_info(self):
-        text = format_interpretations_text(self._make_results())
-        assert "КЛАСТЕР 0" in text
+    def test_contains_cluster_header(self):
+        assert "КЛАСТЕР 0" in format_results(self._full_results())
 
-    def test_contains_error_for_cluster_1(self):
-        text = format_interpretations_text(self._make_results())
-        assert "Ошибка" in text
+    def test_contains_pattern_section_header(self):
+        text = format_results(self._full_results())
+        assert "ПАТТЕРН" in text
 
-    def test_contains_pattern(self):
-        text = format_interpretations_text(self._make_results())
-        assert "/catalog" in text
+    def test_contains_pattern_str(self):
+        text = format_results(self._full_results())
+        assert "/ → /catalog" in text
 
-    def test_contains_anomaly(self):
-        text = format_interpretations_text(self._make_results())
-        assert "АНОМАЛЬНАЯ" in text
+    def test_contains_support_info(self):
+        text = format_results(self._full_results())
+        assert "15" in text
+        assert "50.0" in text
 
-    def test_contains_recommendations(self):
-        text = format_interpretations_text(self._make_results())
-        assert "навигацию" in text.lower() or "каталог" in text.lower()
+    def test_cluster_error_shown(self):
+        text = format_results(self._full_results())
+        assert "Timeout" in text
 
-    def test_empty_results(self):
-        text = format_interpretations_text({"clusters": {}, "patterns": [], "anomalies": []})
-        assert "нет" in text.lower() or len(text) < 30
+    def test_pattern_error_shown(self):
+        text = format_results(self._full_results())
+        assert "API timeout" in text
 
     def test_classification_shown(self):
-        text = format_interpretations_text(self._make_results())
-        assert "типичный" in text
+        assert "типичный" in format_results(self._full_results())
+
+    def test_recommendation_shown(self):
+        assert "навигацию" in format_results(self._full_results()).lower()
+
+    def test_empty_results(self):
+        text = format_results({"clusters": {}, "patterns": []})
+        assert "нет" in text.lower()
+
+    def test_backward_compat_old_format(self):
+        """format_results должен принимать старый формат Dict[int, Dict]."""
+        old = {0: MOCK_RESPONSE, 1: {"error": "x"}}
+        text = format_results(old)
+        assert "КЛАСТЕР 0" in text
+
+    def test_clusters_before_patterns(self):
+        text = format_results(self._full_results())
+        assert text.index("КЛАСТЕР") < text.index("ПАТТЕРН")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Проверка JSON Schema
+# SCHEMA и SYSTEM_PROMPT
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestResponseSchema:
+class TestSchema:
 
-    def test_required_fields_present(self):
-        required = RESPONSE_SCHEMA.get("required", [])
-        for field in ("classification", "confidence", "description",
-                      "problems", "recommendations"):
-            assert field in required
+    def test_required_fields(self):
+        for f in ("classification", "confidence", "description",
+                  "problems", "recommendations"):
+            assert f in SCHEMA["required"]
 
     def test_classification_enum(self):
-        enum = RESPONSE_SCHEMA["properties"]["classification"]["enum"]
-        assert "типичный" in enum
-        assert "нетипичный" in enum
+        enum = SCHEMA["properties"]["classification"]["enum"]
+        assert "типичный" in enum and "нетипичный" in enum
 
     def test_confidence_enum(self):
-        enum = RESPONSE_SCHEMA["properties"]["confidence"]["enum"]
-        assert "высокая" in enum
-        assert "средняя" in enum
-        assert "низкая" in enum
+        enum = SCHEMA["properties"]["confidence"]["enum"]
+        assert {"высокая", "средняя", "низкая"} == set(enum)
 
-    def test_problems_is_array(self):
-        assert RESPONSE_SCHEMA["properties"]["problems"]["type"] == "array"
+    def test_arrays(self):
+        for f in ("problems", "recommendations"):
+            assert SCHEMA["properties"][f]["type"] == "array"
 
-    def test_recommendations_is_array(self):
-        assert RESPONSE_SCHEMA["properties"]["recommendations"]["type"] == "array"
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Системный промпт
-# ═══════════════════════════════════════════════════════════════════════════
 
 class TestSystemPrompt:
 
     def test_is_string(self):
         assert isinstance(SYSTEM_PROMPT, str)
 
-    def test_contains_key_instructions(self):
-        assert "русский" in SYSTEM_PROMPT.lower() or "Язык" in SYSTEM_PROMPT
+    def test_mentions_json(self):
         assert "JSON" in SYSTEM_PROMPT
-        assert "тестировщик" in SYSTEM_PROMPT.lower() or "тестирован" in SYSTEM_PROMPT.lower()
+
+    def test_mentions_russian(self):
+        assert "русский" in SYSTEM_PROMPT.lower() or "Язык" in SYSTEM_PROMPT
 
     def test_mentions_classification(self):
         assert "типичный" in SYSTEM_PROMPT or "классифицир" in SYSTEM_PROMPT.lower()

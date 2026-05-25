@@ -3,28 +3,25 @@ tests/test_preprocessor_clustering.py
 Тесты модулей предобработки и кластеризации.
 
 Запуск:
-    cd web_log_analyzer
-    python -m pytest tests/ -v
+    cd project
+    python -m pytest test/ -v
 """
 
 import os
 import sys
-import tempfile
 from datetime import datetime
 
 import pandas as pd
 import pytest
 
-# Добавляем корень проекта в sys.path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline.preprocessor import (
-    _is_static,
-    _parse_timestamp,
+    _hash,
+    _parse_ts,
     identify_sessions,
     parse_log_file,
-    preprocess_log_file,
-    sessions_to_dataframe,
+    preprocess,
 )
 from pipeline.clustering import (
     cluster_sessions,
@@ -74,53 +71,77 @@ class TestUrlNormalizer:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ПАРСЕР: _is_static
+# СТАТИЧЕСКИЕ РЕСУРСЫ: через STATIC frozenset в preprocessor
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestIsStatic:
+class TestStaticDetection:
+    """Проверяем фильтрацию статики через parse_log_file, не через внутренний хелпер."""
 
-    def test_image(self):
-        assert _is_static("/images/logo.png") is True
-        assert _is_static("/static/icon.ico") is True
+    @pytest.fixture
+    def log_with_static(self, tmp_path):
+        content = (
+            '192.168.1.1 - - [01/Jun/2024:10:00:00] "GET /style.css HTTP/1.1" 200 512 "-" "Mozilla/5.0"\n'
+            '192.168.1.1 - - [01/Jun/2024:10:00:10] "GET /logo.png HTTP/1.1" 200 1024 "-" "Mozilla/5.0"\n'
+            '192.168.1.1 - - [01/Jun/2024:10:00:20] "GET /catalog HTTP/1.1" 200 2048 "-" "Mozilla/5.0"\n'
+        )
+        f = tmp_path / "access.log"
+        f.write_text(content)
+        return str(f)
 
-    def test_css_js(self):
-        assert _is_static("/style.css") is True
-        assert _is_static("/app.js") is True
+    def test_static_counted(self, log_with_static):
+        _, stats = parse_log_file(log_with_static)
+        assert stats["static"] == 2
 
-    def test_page_not_static(self):
-        assert _is_static("/products/123") is False
-        assert _is_static("/") is False
-        assert _is_static("/catalog") is False
+    def test_static_not_in_records(self, log_with_static):
+        records, _ = parse_log_file(log_with_static)
+        for r in records:
+            assert not r["uri"].endswith(".css")
+            assert not r["uri"].endswith(".png")
 
-    def test_with_query(self):
-        assert _is_static("/image.jpg?v=2") is True
+    def test_static_with_query(self, tmp_path):
+        content = '1.1.1.1 - - [01/Jun/2024:10:00:00] "GET /image.jpg?v=2 HTTP/1.1" 200 512 "-" "Mozilla/5.0"\n'
+        f = tmp_path / "a.log"
+        f.write_text(content)
+        records, stats = parse_log_file(str(f))
+        assert stats["static"] == 1
+        assert len(records) == 0
+
+    def test_page_not_static(self, tmp_path):
+        content = '1.1.1.1 - - [01/Jun/2024:10:00:00] "GET /products/123 HTTP/1.1" 200 512 "-" "Mozilla/5.0"\n'
+        f = tmp_path / "b.log"
+        f.write_text(content)
+        records, stats = parse_log_file(str(f))
+        assert stats["static"] == 0
+        assert len(records) == 1
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ПАРСЕР: временна́я метка
+# ПАРСЕР ВРЕМЕННОЙ МЕТКИ: _parse_ts
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestParseTimestamp:
+class TestParseTs:
 
     def test_clf_standard(self):
-        ts = _parse_timestamp("01/Jun/2024:12:30:00 +0300")
+        ts = _parse_ts("01/Jun/2024:12:30:00 +0300")
         assert ts is not None
         assert ts.hour == 12
         assert ts.month == 6
 
     def test_clf_no_tz(self):
-        ts = _parse_timestamp("15/Jan/2023:08:00:00")
+        ts = _parse_ts("15/Jan/2023:08:00:00")
         assert ts is not None
         assert ts.day == 15
 
     def test_nasa_format(self):
-        ts = _parse_timestamp("Thursday, 01-Jun-95 12:00:00 EDT")
+        ts = _parse_ts("Thursday, 01-Jun-95 12:00:00 EDT")
         assert ts is not None
         assert ts.month == 6
 
     def test_invalid(self):
-        assert _parse_timestamp("not-a-date") is None
-        assert _parse_timestamp("") is None
+        assert _parse_ts("not-a-date") is None
+
+    def test_empty(self):
+        assert _parse_ts("") is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -147,18 +168,24 @@ class TestParseLogFile:
         f.write_text(CLF_SAMPLE)
         return str(f)
 
+    def test_stat_keys_present(self, log_file):
+        _, stats = parse_log_file(log_file)
+        for key in ("total", "errors", "static", "bots", "ok"):
+            assert key in stats
+
     def test_parsed_count(self, log_file):
         records, stats = parse_log_file(log_file)
-        # style.css отфильтрован (статика), Googlebot отфильтрован (бот)
-        assert stats["filtered_static"] == 1
-        assert stats["filtered_bots"] == 1
-        assert stats["parse_errors"] == 1
-        assert stats["parsed_ok"] == 5
+        # style.css отфильтрован (статика), Googlebot отфильтрован (бот),
+        # bad line — ошибка парсинга
+        assert stats["static"] == 1
+        assert stats["bots"] == 1
+        assert stats["errors"] == 1
+        assert stats["ok"] == 5
 
     def test_url_normalized(self, log_file):
         records, _ = parse_log_file(log_file)
         uris = [r["uri"] for r in records]
-        assert "/products/{id}" in uris  # /products/123 → /products/{id}
+        assert "/products/{id}" in uris
 
     def test_no_static_in_results(self, log_file):
         records, _ = parse_log_file(log_file)
@@ -170,6 +197,12 @@ class TestParseLogFile:
         for r in records:
             assert "googlebot" not in r["agent"].lower()
 
+    def test_record_fields(self, log_file):
+        records, _ = parse_log_file(log_file)
+        r = records[0]
+        for field in ("ip", "ts", "uri", "status", "bytes", "agent"):
+            assert field in r
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # ИДЕНТИФИКАЦИЯ СЕССИЙ
@@ -178,7 +211,6 @@ class TestParseLogFile:
 class TestIdentifySessions:
 
     def _make_records(self, ip_ts_uri):
-        """Вспомогательная функция: список кортежей (ip, seconds, uri) → записи."""
         base = datetime(2024, 1, 1, 0, 0, 0)
         from datetime import timedelta
         return [
@@ -195,27 +227,25 @@ class TestIdentifySessions:
 
     def test_single_session(self):
         records = self._make_records([
-            ("1.2.3.4", 0,   "/"),
-            ("1.2.3.4", 30,  "/catalog"),
-            ("1.2.3.4", 90,  "/item"),
+            ("1.2.3.4", 0,  "/"),
+            ("1.2.3.4", 30, "/catalog"),
+            ("1.2.3.4", 90, "/item"),
         ])
-        sessions = identify_sessions(records, timeout_sec=1800)
+        sessions = identify_sessions(records, timeout_sec=1800, min_req=2)
         assert len(sessions) == 1
-        assert sessions[0].request_count == 3
+        assert sessions[0]["request_count"] == 3
 
     def test_split_by_timeout(self):
-        """Разрыв > timeout_sec создаёт новую сессию."""
         records = self._make_records([
-            ("1.2.3.4", 0,     "/"),
-            ("1.2.3.4", 60,    "/catalog"),
-            ("1.2.3.4", 5000,  "/news"),   # разрыв 4940 сек > 1800
-            ("1.2.3.4", 5060,  "/about"),
+            ("1.2.3.4", 0,    "/"),
+            ("1.2.3.4", 60,   "/catalog"),
+            ("1.2.3.4", 5000, "/news"),
+            ("1.2.3.4", 5060, "/about"),
         ])
         sessions = identify_sessions(records, timeout_sec=1800)
         assert len(sessions) == 2
 
     def test_multiple_ips(self):
-        """Разные IP — разные сессии."""
         records = self._make_records([
             ("1.1.1.1", 0,  "/"),
             ("1.1.1.1", 30, "/a"),
@@ -225,49 +255,45 @@ class TestIdentifySessions:
         sessions = identify_sessions(records, timeout_sec=1800)
         assert len(sessions) == 2
 
-    def test_min_requests_filter(self):
-        """Сессии с менее чем min_requests запросами отфильтровываются."""
+    def test_min_req_filter(self):
         records = self._make_records([
-            ("1.1.1.1", 0, "/"),            # только 1 запрос
+            ("1.1.1.1", 0, "/"),
             ("2.2.2.2", 0, "/"),
-            ("2.2.2.2", 30, "/catalog"),    # 2 запроса
+            ("2.2.2.2", 30, "/catalog"),
         ])
-        sessions = identify_sessions(records, timeout_sec=1800, min_requests=2)
+        sessions = identify_sessions(records, timeout_sec=1800, min_req=2)
         assert len(sessions) == 1
-        assert sessions[0].ip_hash == sessions[0].ip_hash  # это IP 2.2.2.2
 
     def test_session_fields(self):
-        """Проверяем корректность вычисляемых полей сессии."""
         records = self._make_records([
-            ("1.1.1.1", 0,  "/"),
-            ("1.1.1.1", 60, "/catalog"),
+            ("1.1.1.1", 0,   "/"),
+            ("1.1.1.1", 60,  "/catalog"),
             ("1.1.1.1", 120, "/item"),
         ])
         sessions = identify_sessions(records, timeout_sec=1800)
         s = sessions[0]
-        assert s.request_count == 3
-        assert s.duration_sec == 120
-        assert s.unique_pages == 3
-        assert s.error_rate == 0.0
-        assert len(s.page_sequence) == 3
-        assert len(s.page_set) == 3
+        assert s["request_count"] == 3
+        assert s["duration_sec"] == 120
+        assert s["unique_pages"] == 3
+        assert s["error_rate"] == 0.0
+        assert len(s["page_sequence"]) == 3
+        assert len(s["page_set"]) == 3
 
     def test_ip_anonymized(self):
-        """IP-адрес не хранится в открытом виде."""
         records = self._make_records([
-            ("192.168.0.1", 0, "/"),
+            ("192.168.0.1", 0,  "/"),
             ("192.168.0.1", 30, "/a"),
         ])
         sessions = identify_sessions(records)
-        assert sessions[0].ip_hash != "192.168.0.1"
-        assert len(sessions[0].ip_hash) == 12
+        assert sessions[0]["ip_hash"] != "192.168.0.1"
+        assert len(sessions[0]["ip_hash"]) == 12
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# ПОЛНЫЙ ЦИКЛ ПРЕДОБРАБОТКИ
+# ПОЛНЫЙ ЦИКЛ ПРЕДОБРАБОТКИ: preprocess
 # ═══════════════════════════════════════════════════════════════════════════
 
-class TestPreprocessLogFile:
+class TestPreprocess:
 
     @pytest.fixture
     def log_file(self, tmp_path):
@@ -276,20 +302,20 @@ class TestPreprocessLogFile:
         return str(f)
 
     def test_returns_dataframe(self, log_file):
-        df, stats = preprocess_log_file(log_file)
+        df, stats = preprocess(log_file)
         assert isinstance(df, pd.DataFrame)
         assert "session_id" in df.columns
         assert "request_count" in df.columns
 
     def test_stats_keys(self, log_file):
-        _, stats = preprocess_log_file(log_file)
-        for key in ("total_lines", "parsed_ok", "sessions_total"):
+        _, stats = preprocess(log_file)
+        for key in ("total", "ok", "sessions"):
             assert key in stats
 
     def test_sessions_positive(self, log_file):
-        df, stats = preprocess_log_file(log_file)
-        assert stats["sessions_total"] > 0
-        assert len(df) == stats["sessions_total"]
+        df, stats = preprocess(log_file)
+        assert stats["sessions"] > 0
+        assert len(df) == stats["sessions"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -297,11 +323,9 @@ class TestPreprocessLogFile:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def _make_cluster_df(n=60) -> pd.DataFrame:
-    """Создаёт синтетический DataFrame для тестов кластеризации."""
     import numpy as np
     rng = np.random.default_rng(42)
 
-    # Три явных кластера
     cluster_a = pd.DataFrame({
         "session_id": [f"a_{i}" for i in range(n // 3)],
         "request_count": rng.integers(1, 3, n // 3).astype(float),
@@ -344,9 +368,7 @@ class TestClustering:
         assert result["cluster_id"].notna().all()
 
     def test_k_detected_correctly(self, df):
-        """На трёх явных кластерах метод локтя находит k в диапазоне 2–5."""
         result, meta = cluster_sessions(df, k_min=2, k_max=8)
-        # Метод локтя эвристический — принимаем k от 2 до 5
         assert 2 <= meta["k"] <= 5
 
     def test_explicit_k(self, df):
@@ -401,21 +423,20 @@ class TestIntegration:
 10.0.0.2 - - [01/Jun/2024:10:00:10] "GET /news HTTP/1.1" 200 1024 "-" "Mozilla/5.0"
 10.0.0.3 - - [01/Jun/2024:10:00:00] "GET / HTTP/1.1" 200 1024 "-" "Mozilla/5.0"
 10.0.0.3 - - [01/Jun/2024:10:05:00] "GET /about HTTP/1.1" 200 1024 "-" "Mozilla/5.0"
-""" * 10  # повторяем 10 раз для получения достаточного числа сессий
+""" * 10
 
     def test_full_pipeline(self, tmp_path):
         log_path = str(tmp_path / "test.log")
         with open(log_path, "w") as f:
             f.write(self.MULTI_SESSION_LOG)
 
-        df, stats = preprocess_log_file(log_path)
-        assert stats["sessions_total"] > 0
+        df, stats = preprocess(log_path)
+        assert stats["sessions"] > 0
 
         df_clustered, meta = cluster_sessions(df, k=2)
         assert "cluster_id" in df_clustered.columns
         assert meta["k"] == 2
 
-        # Сводка читаема
         summary = cluster_summary(meta)
         assert len(summary) > 0
 
